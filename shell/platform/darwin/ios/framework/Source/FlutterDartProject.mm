@@ -4,16 +4,18 @@
 
 #define FML_USED_ON_EMBEDDER
 
-#include "flutter/shell/platform/darwin/ios/framework/Source/FlutterDartProject_Internal.h"
+#import "flutter/shell/platform/darwin/ios/framework/Source/FlutterDartProject_Internal.h"
 
+#include "flutter/common/constants.h"
 #include "flutter/common/task_runners.h"
+#include "flutter/fml/mapping.h"
 #include "flutter/fml/message_loop.h"
 #include "flutter/fml/platform/darwin/scoped_nsobject.h"
 #include "flutter/runtime/dart_vm.h"
 #include "flutter/shell/common/shell.h"
 #include "flutter/shell/common/switches.h"
-#include "flutter/shell/platform/darwin/common/command_line.h"
-#include "flutter/shell/platform/darwin/ios/framework/Headers/FlutterViewController.h"
+#import "flutter/shell/platform/darwin/common/command_line.h"
+#import "flutter/shell/platform/darwin/ios/framework/Headers/FlutterViewController.h"
 
 extern "C" {
 #if FLUTTER_RUNTIME_MODE == FLUTTER_RUNTIME_MODE_DEBUG
@@ -25,7 +27,7 @@ extern const intptr_t kPlatformStrongDillSize;
 
 static const char* kApplicationKernelSnapshotFileName = "kernel_blob.bin";
 
-static flutter::Settings DefaultSettingsForProcess(NSBundle* bundle = nil) {
+flutter::Settings FLTDefaultSettingsForBundle(NSBundle* bundle) {
   auto command_line = flutter::CommandLineFromNSProcessInfo();
 
   // Precedence:
@@ -58,7 +60,7 @@ static flutter::Settings DefaultSettingsForProcess(NSBundle* bundle = nil) {
   // The command line arguments may not always be complete. If they aren't, attempt to fill in
   // defaults.
 
-  // Flutter ships the ICU data file in the the bundle of the engine. Look for it there.
+  // Flutter ships the ICU data file in the bundle of the engine. Look for it there.
   if (settings.icu_data_path.size() == 0) {
     NSString* icuDataPath = [engineBundle pathForResource:@"icudtl" ofType:@"dat"];
     if (icuDataPath.length > 0) {
@@ -131,6 +133,14 @@ static flutter::Settings DefaultSettingsForProcess(NSBundle* bundle = nil) {
     }
   }
 
+  // Domain network configuration
+  NSDictionary* appTransportSecurity =
+      [mainBundle objectForInfoDictionaryKey:@"NSAppTransportSecurity"];
+  settings.may_insecurely_connect_to_all_domains =
+      [FlutterDartProject allowsArbitraryLoads:appTransportSecurity];
+  settings.domain_network_policy =
+      [FlutterDartProject domainNetworkPolicy:appTransportSecurity].UTF8String;
+
 #if FLUTTER_RUNTIME_MODE == FLUTTER_RUNTIME_MODE_DEBUG
   // There are no ownership concerns here as all mappings are owned by the
   // embedder and not the engine.
@@ -142,6 +152,16 @@ static flutter::Settings DefaultSettingsForProcess(NSBundle* bundle = nil) {
       make_mapping_callback(kPlatformStrongDill, kPlatformStrongDillSize);
 #endif  // FLUTTER_RUNTIME_MODE == FLUTTER_RUNTIME_MODE_DEBUG
 
+  // If we even support setting this e.g. from the command line or the plist,
+  // we should let the user override it.
+  // Otherwise, we want to set this to a value that will avoid having the OS
+  // kill us. On most iOS devices, that happens somewhere near half
+  // the available memory.
+  // The VM expects this value to be in megabytes.
+  if (settings.old_gen_heap_size <= 0) {
+    settings.old_gen_heap_size = std::round([NSProcessInfo processInfo].physicalMemory * .48 /
+                                            flutter::kMegaByteSizeInBytes);
+  }
   return settings;
 }
 
@@ -161,10 +181,28 @@ static flutter::Settings DefaultSettingsForProcess(NSBundle* bundle = nil) {
   self = [super init];
 
   if (self) {
-    _settings = DefaultSettingsForProcess(bundle);
+    _settings = FLTDefaultSettingsForBundle(bundle);
   }
 
   return self;
+}
+
+- (instancetype)initWithSettings:(const flutter::Settings&)settings {
+  self = [self initWithPrecompiledDartBundle:nil];
+
+  if (self) {
+    _settings = settings;
+  }
+
+  return self;
+}
+
+#pragma mark - PlatformData accessors
+
+- (const flutter::PlatformData)defaultPlatformData {
+  flutter::PlatformData PlatformData;
+  PlatformData.lifecycle_state = std::string("AppLifecycleState.detached");
+  return PlatformData;
 }
 
 #pragma mark - Settings accessors
@@ -210,6 +248,34 @@ static flutter::Settings DefaultSettingsForProcess(NSBundle* bundle = nil) {
   return flutterAssetsName;
 }
 
++ (NSString*)domainNetworkPolicy:(NSDictionary*)appTransportSecurity {
+  // https://developer.apple.com/documentation/bundleresources/information_property_list/nsapptransportsecurity/nsexceptiondomains
+  NSDictionary* exceptionDomains = [appTransportSecurity objectForKey:@"NSExceptionDomains"];
+  if (exceptionDomains == nil) {
+    return @"";
+  }
+  NSMutableArray* networkConfigArray = [[NSMutableArray alloc] init];
+  for (NSString* domain in exceptionDomains) {
+    NSDictionary* domainConfiguration = [exceptionDomains objectForKey:domain];
+    // Default value is false.
+    bool includesSubDomains =
+        [[domainConfiguration objectForKey:@"NSIncludesSubdomains"] boolValue];
+    bool allowsCleartextCommunication =
+        [[domainConfiguration objectForKey:@"NSExceptionAllowsInsecureHTTPLoads"] boolValue];
+    [networkConfigArray addObject:@[
+      domain, includesSubDomains ? @YES : @NO, allowsCleartextCommunication ? @YES : @NO
+    ]];
+  }
+  NSData* jsonData = [NSJSONSerialization dataWithJSONObject:networkConfigArray
+                                                     options:0
+                                                       error:NULL];
+  return [[NSString alloc] initWithData:jsonData encoding:NSUTF8StringEncoding];
+}
+
++ (bool)allowsArbitraryLoads:(NSDictionary*)appTransportSecurity {
+  return [[appTransportSecurity objectForKey:@"NSAllowsArbitraryLoads"] boolValue];
+}
+
 + (NSString*)lookupKeyForAsset:(NSString*)asset {
   return [self lookupKeyForAsset:asset fromBundle:nil];
 }
@@ -233,5 +299,25 @@ static flutter::Settings DefaultSettingsForProcess(NSBundle* bundle = nil) {
 + (NSString*)defaultBundleIdentifier {
   return @"io.flutter.flutter.app";
 }
+
+#pragma mark - Settings utilities
+
+- (void)setPersistentIsolateData:(NSData*)data {
+  if (data == nil) {
+    return;
+  }
+
+  NSData* persistent_isolate_data = [data copy];
+  fml::NonOwnedMapping::ReleaseProc data_release_proc = [persistent_isolate_data](auto, auto) {
+    [persistent_isolate_data release];
+  };
+  _settings.persistent_isolate_data = std::make_shared<fml::NonOwnedMapping>(
+      static_cast<const uint8_t*>(persistent_isolate_data.bytes),  // bytes
+      persistent_isolate_data.length,                              // byte length
+      data_release_proc                                            // release proc
+  );
+}
+
+#pragma mark - PlatformData utilities
 
 @end

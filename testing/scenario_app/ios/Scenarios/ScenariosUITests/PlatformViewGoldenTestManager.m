@@ -4,6 +4,8 @@
 
 #import "PlatformViewGoldenTestManager.h"
 
+#import <XCTest/XCTest.h>
+
 @interface PlatformViewGoldenTestManager ()
 
 @property(readwrite, strong, nonatomic) GoldenImage* goldenImage;
@@ -23,11 +25,15 @@ NSDictionary* launchArgsMap;
     dispatch_once(&onceToken, ^{
       launchArgsMap = @{
         @"--platform-view" : @"platform_view",
+        @"--platform-view-multiple" : @"platform_view_multiple",
+        @"--platform-view-multiple-background-foreground" :
+            @"platform_view_multiple_background_foreground",
         @"--platform-view-cliprect" : @"platform_view_cliprect",
         @"--platform-view-cliprrect" : @"platform_view_cliprrect",
         @"--platform-view-clippath" : @"platform_view_clippath",
         @"--platform-view-transform" : @"platform_view_transform",
         @"--platform-view-opacity" : @"platform_view_opacity",
+        @"--platform-view-rotate" : @"platform_view_rotate",
       };
     });
     _identifier = launchArgsMap[launchArg];

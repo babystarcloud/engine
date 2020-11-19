@@ -5,9 +5,11 @@
 #define FML_USED_ON_EMBEDDER
 
 #include <cstdlib>
+#include <cstring>
 
 #include "flutter/assets/asset_manager.h"
 #include "flutter/assets/directory_asset_bundle.h"
+#include "flutter/fml/build_config.h"
 #include "flutter/fml/file.h"
 #include "flutter/fml/make_copyable.h"
 #include "flutter/fml/message_loop.h"
@@ -60,8 +62,9 @@ class ScriptCompletionTaskObserver {
     if (!has_terminated) {
       // Only try to terminate the loop once.
       has_terminated = true;
-      main_task_runner_->PostTask(
-          []() { fml::MessageLoop::GetCurrent().Terminate(); });
+      fml::TaskRunner::RunNowOrPostTask(main_task_runner_, []() {
+        fml::MessageLoop::GetCurrent().Terminate();
+      });
     }
   }
 
@@ -90,8 +93,10 @@ static void UnblockSIGPROF() {
 #endif  // defined(OS_POSIX)
 }
 
-int RunTester(const flutter::Settings& settings, bool run_forever) {
-  const auto thread_label = "io.flutter.test";
+int RunTester(const flutter::Settings& settings,
+              bool run_forever,
+              bool multithreaded) {
+  const auto thread_label = "io.flutter.test.";
 
   // Necessary if we want to use the CPU profiler on the main isolate's mutator
   // thread.
@@ -104,12 +109,30 @@ int RunTester(const flutter::Settings& settings, bool run_forever) {
 
   auto current_task_runner = fml::MessageLoop::GetCurrent().GetTaskRunner();
 
-  // Setup a single threaded test runner configuration.
+  std::unique_ptr<ThreadHost> threadhost;
+  fml::RefPtr<fml::TaskRunner> platform_task_runner;
+  fml::RefPtr<fml::TaskRunner> raster_task_runner;
+  fml::RefPtr<fml::TaskRunner> ui_task_runner;
+  fml::RefPtr<fml::TaskRunner> io_task_runner;
+
+  if (multithreaded) {
+    threadhost = std::make_unique<ThreadHost>(
+        thread_label, ThreadHost::Type::Platform | ThreadHost::Type::IO |
+                          ThreadHost::Type::UI | ThreadHost::Type::GPU);
+    platform_task_runner = current_task_runner;
+    raster_task_runner = threadhost->raster_thread->GetTaskRunner();
+    ui_task_runner = threadhost->ui_thread->GetTaskRunner();
+    io_task_runner = threadhost->io_thread->GetTaskRunner();
+  } else {
+    platform_task_runner = raster_task_runner = ui_task_runner =
+        io_task_runner = current_task_runner;
+  }
+
   const flutter::TaskRunners task_runners(thread_label,  // dart thread label
-                                          current_task_runner,  // platform
-                                          current_task_runner,  // gpu
-                                          current_task_runner,  // ui
-                                          current_task_runner   // io
+                                          platform_task_runner,  // platform
+                                          raster_task_runner,    // raster
+                                          ui_task_runner,        // ui
+                                          io_task_runner         // io
   );
 
   Shell::CreateCallback<PlatformView> on_create_platform_view =
@@ -118,7 +141,7 @@ int RunTester(const flutter::Settings& settings, bool run_forever) {
       };
 
   Shell::CreateCallback<Rasterizer> on_create_rasterizer = [](Shell& shell) {
-    return std::make_unique<Rasterizer>(shell, shell.GetTaskRunners());
+    return std::make_unique<Rasterizer>(shell);
   };
 
   auto shell = Shell::Create(task_runners,             //
@@ -168,10 +191,11 @@ int RunTester(const flutter::Settings& settings, bool run_forever) {
 
   auto asset_manager = std::make_shared<flutter::AssetManager>();
   asset_manager->PushBack(std::make_unique<flutter::DirectoryAssetBundle>(
-      fml::Duplicate(settings.assets_dir)));
-  asset_manager->PushBack(
-      std::make_unique<flutter::DirectoryAssetBundle>(fml::OpenDirectory(
-          settings.assets_path.c_str(), false, fml::FilePermission::kRead)));
+      fml::Duplicate(settings.assets_dir), true));
+  asset_manager->PushBack(std::make_unique<flutter::DirectoryAssetBundle>(
+      fml::OpenDirectory(settings.assets_path.c_str(), false,
+                         fml::FilePermission::kRead),
+      true));
 
   RunConfiguration run_configuration(std::move(isolate_configuration),
                                      std::move(asset_manager));
@@ -187,21 +211,35 @@ int RunTester(const flutter::Settings& settings, bool run_forever) {
 
   bool engine_did_run = false;
 
-  fml::MessageLoop::GetCurrent().AddTaskObserver(
-      reinterpret_cast<intptr_t>(&completion_observer),
-      [&completion_observer]() { completion_observer.DidProcessTask(); });
+  fml::AutoResetWaitableEvent latch;
+  auto task_observer_add = [&completion_observer]() {
+    fml::MessageLoop::GetCurrent().AddTaskObserver(
+        reinterpret_cast<intptr_t>(&completion_observer),
+        [&completion_observer]() { completion_observer.DidProcessTask(); });
+  };
+
+  auto task_observer_remove = [&completion_observer, &latch]() {
+    fml::MessageLoop::GetCurrent().RemoveTaskObserver(
+        reinterpret_cast<intptr_t>(&completion_observer));
+    latch.Signal();
+  };
 
   shell->RunEngine(std::move(run_configuration),
-                   [&engine_did_run](Engine::RunStatus run_status) mutable {
+                   [&engine_did_run, &ui_task_runner,
+                    &task_observer_add](Engine::RunStatus run_status) mutable {
                      if (run_status != flutter::Engine::RunStatus::Failure) {
                        engine_did_run = true;
+                       // Now that our engine is initialized we can install the
+                       // ScriptCompletionTaskObserver
+                       fml::TaskRunner::RunNowOrPostTask(ui_task_runner,
+                                                         task_observer_add);
                      }
                    });
 
-  flutter::ViewportMetrics metrics;
+  flutter::ViewportMetrics metrics{};
   metrics.device_pixel_ratio = 3.0;
-  metrics.physical_width = 2400;   // 800 at 3x resolution
-  metrics.physical_height = 1800;  // 600 at 3x resolution
+  metrics.physical_width = 2400.0;   // 800 at 3x resolution.
+  metrics.physical_height = 1800.0;  // 600 at 3x resolution.
   shell->GetPlatformView()->SetViewportMetrics(metrics);
 
   // Run the message loop and wait for the script to do its thing.
@@ -209,8 +247,8 @@ int RunTester(const flutter::Settings& settings, bool run_forever) {
 
   // Cleanup the completion observer synchronously as it is living on the
   // stack.
-  fml::MessageLoop::GetCurrent().RemoveTaskObserver(
-      reinterpret_cast<intptr_t>(&completion_observer));
+  fml::TaskRunner::RunNowOrPostTask(ui_task_runner, task_observer_remove);
+  latch.Wait();
 
   if (!engine_did_run) {
     // If the engine itself didn't have a chance to run, there is no point in
@@ -270,7 +308,9 @@ int main(int argc, char* argv[]) {
     return true;
   };
 
-  return flutter::RunTester(
-      settings, command_line.HasOption(
-                    flutter::FlagForSwitch(flutter::Switch::RunForever)));
+  return flutter::RunTester(settings,
+                            command_line.HasOption(flutter::FlagForSwitch(
+                                flutter::Switch::RunForever)),
+                            command_line.HasOption(flutter::FlagForSwitch(
+                                flutter::Switch::ForceMultithreading)));
 }

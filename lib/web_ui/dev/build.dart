@@ -2,6 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+// @dart = 2.6
 import 'dart:async';
 
 import 'package:args/command_runner.dart';
@@ -12,7 +13,7 @@ import 'package:watcher/watcher.dart';
 import 'environment.dart';
 import 'utils.dart';
 
-class BuildCommand extends Command<bool> {
+class BuildCommand extends Command<bool> with ArgUtils {
   BuildCommand() {
     argParser
       ..addFlag(
@@ -29,14 +30,14 @@ class BuildCommand extends Command<bool> {
   @override
   String get description => 'Build the Flutter web engine.';
 
-  bool get isWatchMode => argResults['watch'];
+  bool get isWatchMode => boolArg('watch');
 
   @override
   FutureOr<bool> run() async {
     final FilePath libPath = FilePath.fromWebUi('lib');
     final Pipeline buildPipeline = Pipeline(steps: <PipelineStep>[
       gn,
-      ninja,
+      () => ninja(),
     ]);
     await buildPipeline.start();
 
@@ -46,6 +47,8 @@ class BuildCommand extends Command<bool> {
       PipelineWatcher(
         dir: libPath.absolute,
         pipeline: buildPipeline,
+        // Ignore font files that are copied whenever tests run.
+        ignore: (event) => event.path.endsWith('.ttf'),
       ).start();
       // Return a never-ending future.
       return Completer<bool>().future;
@@ -68,8 +71,8 @@ Future<void> gn() {
 
 // TODO(mdebbar): Make the ninja step interruptable in the pipeline.
 Future<void> ninja() {
-  print('Running ninja...');
-  return runProcess('ninja', <String>[
+  print('Running autoninja...');
+  return runProcess('autoninja', <String>[
     '-C',
     environment.hostDebugUnoptDir.path,
   ]);
@@ -106,8 +109,10 @@ class Pipeline {
         await _currentStepFuture;
       }
       status = PipelineStatus.done;
-    } catch (_) {
+    } catch (error, stackTrace) {
       status = PipelineStatus.error;
+      print('Error in the pipeline: $error');
+      print(stackTrace);
     } finally {
       _currentStepFuture = null;
     }
@@ -121,10 +126,13 @@ class Pipeline {
   }
 }
 
+typedef WatchEventPredicate = bool Function(WatchEvent event);
+
 class PipelineWatcher {
   PipelineWatcher({
     @required this.dir,
     @required this.pipeline,
+    this.ignore,
   }) : watcher = DirectoryWatcher(dir);
 
   /// The path of the directory to watch for changes.
@@ -136,6 +144,10 @@ class PipelineWatcher {
   /// Used to watch a directory for any file system changes.
   final DirectoryWatcher watcher;
 
+  /// A callback that determines whether to rerun the pipeline or not for a
+  /// given [WatchEvent] instance.
+  final WatchEventPredicate ignore;
+
   void start() {
     watcher.events.listen(_onEvent);
   }
@@ -144,6 +156,10 @@ class PipelineWatcher {
   Timer _scheduledPipeline;
 
   void _onEvent(WatchEvent event) {
+    if (ignore != null && ignore(event)) {
+      return;
+    }
+
     final String relativePath = path.relative(event.path, from: dir);
     print('- [${event.type}] ${relativePath}');
 

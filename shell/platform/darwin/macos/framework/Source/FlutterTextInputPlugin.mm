@@ -107,9 +107,12 @@ static NSString* const kMultilineInputType = @"TextInputType.multiline";
   } else if ([method isEqualToString:kSetEditingStateMethod]) {
     NSDictionary* state = call.arguments;
     self.activeModel.state = state;
+    // Close the loop, since the framework state could have been updated by the
+    // engine since it sent this update, and needs to now be made to match the
+    // engine's version of the state.
+    [self updateEditState];
   } else {
     handled = NO;
-    NSLog(@"Unhandled text input method '%@'", method);
   }
   result(handled ? nil : FlutterMethodNotImplemented);
 }
@@ -121,7 +124,6 @@ static NSString* const kMultilineInputType = @"TextInputType.multiline";
   if (self.activeModel == nil) {
     return;
   }
-
   [_channel invokeMethod:kUpdateEditStateResponseMethod
                arguments:@[ self.activeModel.clientID, self.activeModel.state ]];
 }
@@ -141,57 +143,6 @@ static NSString* const kMultilineInputType = @"TextInputType.multiline";
 }
 
 #pragma mark -
-#pragma mark NSStandardKeyBindingMethods
-
-/**
- * Note, experimentation indicates that moveRight and moveLeft are called rather
- * than the supposedly more RTL-friendly moveForward and moveBackward.
- */
-- (void)moveLeft:(nullable id)sender {
-  NSRange selection = self.activeModel.selectedRange;
-  if (selection.length == 0) {
-    if (selection.location > 0) {
-      // Move to previous location
-      self.activeModel.selectedRange = NSMakeRange(selection.location - 1, 0);
-      [self updateEditState];
-    }
-  } else {
-    // Collapse current selection
-    self.activeModel.selectedRange = NSMakeRange(selection.location, 0);
-    [self updateEditState];
-  }
-}
-
-- (void)moveRight:(nullable id)sender {
-  NSRange selection = self.activeModel.selectedRange;
-  if (selection.length == 0) {
-    if (selection.location < self.activeModel.text.length) {
-      // Move to next location
-      self.activeModel.selectedRange = NSMakeRange(selection.location + 1, 0);
-      [self updateEditState];
-    }
-  } else {
-    // Collapse current selection
-    self.activeModel.selectedRange = NSMakeRange(selection.location + selection.length, 0);
-    [self updateEditState];
-  }
-}
-
-- (void)deleteBackward:(id)sender {
-  NSRange selection = self.activeModel.selectedRange;
-  if (selection.location == 0)
-    return;
-  NSRange range = selection;
-  if (selection.length == 0) {
-    NSUInteger location = (selection.location == NSNotFound) ? self.activeModel.text.length - 1
-                                                             : selection.location - 1;
-    range = NSMakeRange(location, 1);
-  }
-  self.activeModel.selectedRange = NSMakeRange(range.location, 0);
-  [self insertText:@"" replacementRange:range];  // Updates edit state
-}
-
-#pragma mark -
 #pragma mark NSTextInputClient
 
 - (void)insertText:(id)string replacementRange:(NSRange)range {
@@ -200,12 +151,28 @@ static NSString* const kMultilineInputType = @"TextInputType.multiline";
       // Use selection
       range = self.activeModel.selectedRange;
     }
-    if (range.location > self.activeModel.text.length)
-      range.location = self.activeModel.text.length;
-    if (range.length > (self.activeModel.text.length - range.location))
-      range.length = self.activeModel.text.length - range.location;
-    [self.activeModel.text replaceCharactersInRange:range withString:string];
-    self.activeModel.selectedRange = NSMakeRange(range.location + ((NSString*)string).length, 0);
+    // The selected range can actually have negative numbers, since it can start
+    // at the end of the range if the user selected the text going backwards.
+    // NSRange uses NSUIntegers, however, so we have to cast them to know if the
+    // selection is reversed or not.
+    long signedLength = static_cast<long>(range.length);
+
+    NSUInteger length;
+    NSUInteger location;
+    if (signedLength >= 0) {
+      location = range.location;
+      length = range.length;
+    } else {
+      location = range.location + range.length;
+      length = ABS(signedLength);
+    }
+    if (location > self.activeModel.text.length)
+      location = self.activeModel.text.length;
+    if (length > (self.activeModel.text.length - location))
+      length = self.activeModel.text.length - location;
+    [self.activeModel.text replaceCharactersInRange:NSMakeRange(location, length)
+                                         withString:string];
+    self.activeModel.selectedRange = NSMakeRange(location + ((NSString*)string).length, 0);
     [self updateEditState];
   }
 }

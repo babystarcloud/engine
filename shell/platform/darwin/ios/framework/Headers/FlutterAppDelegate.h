@@ -7,8 +7,8 @@
 
 #import <UIKit/UIKit.h>
 
-#include "FlutterMacros.h"
-#include "FlutterPlugin.h"
+#import "FlutterMacros.h"
+#import "FlutterPlugin.h"
 
 /**
  * `UIApplicationDelegate` subclass for simple apps that want default behavior.
@@ -28,15 +28,6 @@ FLUTTER_EXPORT
     : UIResponder <UIApplicationDelegate, FlutterPluginRegistry, FlutterAppLifeCycleProvider>
 
 @property(strong, nonatomic) UIWindow* window;
-
-/**
- * Handle StatusBar touches.
- *
- * Call this from your AppDelegate's `touchesBegan:withEvent:` to have Flutter respond to StatusBar
- * touches.  For example, to enable scroll-to-top behavior.  FlutterAppDelegate already calls it so
- * you only need to manually call it if you aren't using a FlutterAppDelegate.
- */
-+ (void)handleStatusBarTouches:(NSSet<UITouch*>*)touches withEvent:(UIEvent*)event;
 
 @end
 

@@ -35,6 +35,8 @@
 #include "third_party/googletest/googletest/include/gtest/gtest_prod.h"  // nogncheck
 #include "third_party/skia/include/core/SkFontMetrics.h"
 #include "third_party/skia/include/core/SkRect.h"
+#include "utils/LinuxUtils.h"
+#include "utils/MacUtils.h"
 #include "utils/WindowsUtils.h"
 
 namespace txt {
@@ -127,6 +129,7 @@ class ParagraphTxt : public Paragraph {
  private:
   friend class ParagraphBuilderTxt;
   FRIEND_TEST(ParagraphTest, SimpleParagraph);
+  FRIEND_TEST(ParagraphTest, SimpleParagraphSmall);
   FRIEND_TEST(ParagraphTest, SimpleRedParagraph);
   FRIEND_TEST(ParagraphTest, RainbowParagraph);
   FRIEND_TEST(ParagraphTest, DefaultStyleParagraph);
@@ -136,17 +139,18 @@ class ParagraphTxt : public Paragraph {
   FRIEND_TEST_WINDOWS_DISABLED(ParagraphTest, CenterAlignParagraph);
   FRIEND_TEST_WINDOWS_DISABLED(ParagraphTest, JustifyAlignParagraph);
   FRIEND_TEST_WINDOWS_DISABLED(ParagraphTest, JustifyRTL);
-  FRIEND_TEST_WINDOWS_DISABLED(ParagraphTest, JustifyRTLNewLine);
+  FRIEND_TEST_WINDOWS_DISABLED(ParagraphTest, InlinePlaceholderLongestLine);
+  FRIEND_TEST_LINUX_ONLY(ParagraphTest, JustifyRTLNewLine);
   FRIEND_TEST(ParagraphTest, DecorationsParagraph);
   FRIEND_TEST(ParagraphTest, ItalicsParagraph);
   FRIEND_TEST(ParagraphTest, ChineseParagraph);
   FRIEND_TEST(ParagraphTest, DISABLED_ArabicParagraph);
   FRIEND_TEST(ParagraphTest, SpacingParagraph);
   FRIEND_TEST(ParagraphTest, LongWordParagraph);
-  FRIEND_TEST(ParagraphTest, KernScaleParagraph);
+  FRIEND_TEST_LINUX_ONLY(ParagraphTest, KernScaleParagraph);
   FRIEND_TEST_WINDOWS_DISABLED(ParagraphTest, NewlineParagraph);
-  FRIEND_TEST_WINDOWS_DISABLED(ParagraphTest, EmojiParagraph);
-  FRIEND_TEST_WINDOWS_DISABLED(ParagraphTest, EmojiMultiLineRectsParagraph);
+  FRIEND_TEST_LINUX_ONLY(ParagraphTest, EmojiParagraph);
+  FRIEND_TEST_LINUX_ONLY(ParagraphTest, EmojiMultiLineRectsParagraph);
   FRIEND_TEST(ParagraphTest, HyphenBreakParagraph);
   FRIEND_TEST(ParagraphTest, RepeatLayoutParagraph);
   FRIEND_TEST(ParagraphTest, Ellipsize);
@@ -158,6 +162,8 @@ class ParagraphTxt : public Paragraph {
   FRIEND_TEST(ParagraphTest, InlinePlaceholder0xFFFCParagraph);
   FRIEND_TEST(ParagraphTest, FontFeaturesParagraph);
   FRIEND_TEST(ParagraphTest, GetGlyphPositionAtCoordinateSegfault);
+  FRIEND_TEST(ParagraphTest, KhmerLineBreaker);
+  FRIEND_TEST(ParagraphTest, TextHeightBehaviorRectsParagraph);
 
   // Starting data to layout.
   std::vector<uint16_t> text_;
@@ -229,6 +235,7 @@ class ParagraphTxt : public Paragraph {
           end_(e),
           direction_(d),
           style_(&st),
+          is_ghost_(false),
           placeholder_run_(&placeholder) {}
 
     size_t start() const { return start_; }
@@ -253,17 +260,11 @@ class ParagraphTxt : public Paragraph {
   struct GlyphPosition {
     Range<size_t> code_units;
     Range<double> x_pos;
-    // Tracks the cluster that this glyph position belongs to. For example, in
-    // extended emojis, multiple glyph positions will have the same cluster. The
-    // cluster can be used as a key to distinguish between codepoints that
-    // contribute to the drawing of a single glyph.
-    size_t cluster;
 
     GlyphPosition(double x_start,
                   double x_advance,
                   size_t code_unit_index,
-                  size_t code_unit_width,
-                  size_t cluster);
+                  size_t code_unit_width);
 
     void Shift(double delta);
   };
@@ -364,12 +365,13 @@ class ParagraphTxt : public Paragraph {
                          double& max_ascent,
                          double& max_descent,
                          double& max_unscaled_ascent,
-                         PlaceholderRun* placeholder_run);
+                         PlaceholderRun* placeholder_run,
+                         size_t line_number,
+                         size_t line_limit);
+
   // Calculate the starting X offset of a line based on the line's width and
   // alignment.
-  double GetLineXOffset(double line_total_advance,
-                        size_t line_number,
-                        bool justify_line);
+  double GetLineXOffset(double line_total_advance, bool justify_line);
 
   // Creates and draws the decorations onto the canvas.
   void PaintDecorations(SkCanvas* canvas,

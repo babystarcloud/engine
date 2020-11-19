@@ -6,12 +6,12 @@
 
 #include <sstream>
 
-#include "flutter/common/runtime.h"
 #include "flutter/fml/native_library.h"
 #include "flutter/fml/paths.h"
 #include "flutter/fml/trace_event.h"
 #include "flutter/lib/snapshot/snapshot.h"
 #include "flutter/runtime/dart_vm.h"
+#include "third_party/dart/runtime/include/dart_api.h"
 
 namespace flutter {
 
@@ -25,7 +25,7 @@ const char* DartSnapshot::kIsolateInstructionsSymbol =
 // data through symbols that are statically linked into the executable.
 // On other platforms this data is obtained by a dynamic symbol lookup.
 #define DART_SNAPSHOT_STATIC_LINK \
-  (OS_WIN || (OS_ANDROID && FLUTTER_JIT_RUNTIME))
+  ((OS_WIN || OS_ANDROID) && FLUTTER_JIT_RUNTIME)
 
 #if !DART_SNAPSHOT_STATIC_LINK
 
@@ -181,10 +181,6 @@ fml::RefPtr<DartSnapshot> DartSnapshot::IsolateSnapshotFromSettings(
   return nullptr;
 }
 
-fml::RefPtr<DartSnapshot> DartSnapshot::Empty() {
-  return fml::MakeRefCounted<DartSnapshot>(nullptr, nullptr);
-}
-
 DartSnapshot::DartSnapshot(std::shared_ptr<const fml::Mapping> data,
                            std::shared_ptr<const fml::Mapping> instructions)
     : data_(std::move(data)), instructions_(std::move(instructions)) {}
@@ -205,6 +201,18 @@ const uint8_t* DartSnapshot::GetDataMapping() const {
 
 const uint8_t* DartSnapshot::GetInstructionsMapping() const {
   return instructions_ ? instructions_->GetMapping() : nullptr;
+}
+
+bool DartSnapshot::IsNullSafetyEnabled(const fml::Mapping* kernel) const {
+  return ::Dart_DetectNullSafety(
+      nullptr,           // script_uri (unsupported by Flutter)
+      nullptr,           // package_config (package resolution of parent used)
+      nullptr,           // original_working_directory (no package config)
+      GetDataMapping(),  // snapshot_data
+      GetInstructionsMapping(),                 // snapshot_instructions
+      kernel ? kernel->GetMapping() : nullptr,  // kernel_buffer
+      kernel ? kernel->GetSize() : 0u           // kernel_buffer_size
+  );
 }
 
 }  // namespace flutter

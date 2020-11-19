@@ -7,20 +7,22 @@
 
 #include <memory>
 
+#include "flow/embedded_views.h"
+#include "flutter/common/graphics/texture.h"
 #include "flutter/common/task_runners.h"
-#include "flutter/flow/texture.h"
+#include "flutter/flow/surface.h"
 #include "flutter/fml/macros.h"
 #include "flutter/fml/memory/weak_ptr.h"
 #include "flutter/lib/ui/semantics/custom_accessibility_action.h"
 #include "flutter/lib/ui/semantics/semantics_node.h"
 #include "flutter/lib/ui/window/platform_message.h"
 #include "flutter/lib/ui/window/pointer_data_packet.h"
+#include "flutter/lib/ui/window/pointer_data_packet_converter.h"
 #include "flutter/lib/ui/window/viewport_metrics.h"
 #include "flutter/shell/common/pointer_data_dispatcher.h"
-#include "flutter/shell/common/surface.h"
 #include "flutter/shell/common/vsync_waiter.h"
 #include "third_party/skia/include/core/SkSize.h"
-#include "third_party/skia/include/gpu/GrContext.h"
+#include "third_party/skia/include/gpu/GrDirectContext.h"
 
 namespace flutter {
 
@@ -84,7 +86,8 @@ class PlatformView {
     ///
     /// @param[in]  closure  The callback to execute on the next frame.
     ///
-    virtual void OnPlatformViewSetNextFrameCallback(fml::closure closure) = 0;
+    virtual void OnPlatformViewSetNextFrameCallback(
+        const fml::closure& closure) = 0;
 
     //--------------------------------------------------------------------------
     /// @brief      Notifies the delegate the viewport metrics of the platform
@@ -170,7 +173,7 @@ class PlatformView {
     ///             Flutter layer tree. All textures must have a unique
     ///             identifier. When the rasterizer encounters an external
     ///             texture within its hierarchy, it gives the embedder a chance
-    ///             to update that texture on the GPU thread before it
+    ///             to update that texture on the raster thread before it
     ///             composites the same on-screen.
     ///
     /// @param[in]  texture  The texture that is being updated by the embedder
@@ -350,10 +353,11 @@ class PlatformView {
 
   //----------------------------------------------------------------------------
   /// @brief      Used by embedders to specify the updated viewport metrics. In
-  ///             response to this call, on the GPU thread, the rasterizer may
-  ///             need to be reconfigured to the updated viewport dimensions. On
-  ///             the UI thread, the framework may need to start generating a
-  ///             new frame for the updated viewport metrics as well.
+  ///             response to this call, on the raster thread, the rasterizer
+  ///             may need to be reconfigured to the updated viewport
+  ///             dimensions. On the UI thread, the framework may need to start
+  ///             generating a new frame for the updated viewport metrics as
+  ///             well.
   ///
   /// @param[in]  metrics  The updated viewport metrics.
   ///
@@ -405,7 +409,7 @@ class PlatformView {
   ///             main render thread GPU context. May be `nullptr` in case such
   ///             a context cannot be created.
   ///
-  virtual sk_sp<GrContext> CreateResourceContext() const;
+  virtual sk_sp<GrDirectContext> CreateResourceContext() const;
 
   //----------------------------------------------------------------------------
   /// @brief      Used by the shell to notify the embedder that the resource
@@ -468,7 +472,7 @@ class PlatformView {
   /// @param[in]  closure  The callback to execute on the render thread when the
   ///                      next frame gets rendered.
   ///
-  void SetNextFrameCallback(fml::closure closure);
+  void SetNextFrameCallback(const fml::closure& closure);
 
   //----------------------------------------------------------------------------
   /// @brief      Dispatches pointer events from the embedder to the
@@ -486,7 +490,7 @@ class PlatformView {
   ///             textures must have a unique identifier. When the
   ///             rasterizer encounters an external texture within its
   ///             hierarchy, it gives the embedder a chance to update that
-  ///             texture on the GPU thread before it composites the same
+  ///             texture on the raster thread before it composites the same
   ///             on-screen.
   ///
   /// @attention  This method must only be called once per texture. When the
@@ -540,10 +544,32 @@ class PlatformView {
   ///
   void MarkTextureFrameAvailable(int64_t texture_id);
 
+  //--------------------------------------------------------------------------
+  /// @brief      Directly invokes platform-specific APIs to compute the
+  ///             locale the platform would have natively resolved to.
+  ///
+  /// @param[in]  supported_locale_data  The vector of strings that represents
+  ///                                    the locales supported by the app.
+  ///                                    Each locale consists of three
+  ///                                    strings: languageCode, countryCode,
+  ///                                    and scriptCode in that order.
+  ///
+  /// @return     A vector of 3 strings languageCode, countryCode, and
+  ///             scriptCode that represents the locale selected by the
+  ///             platform. Empty strings mean the value was unassigned. Empty
+  ///             vector represents a null locale.
+  ///
+  virtual std::unique_ptr<std::vector<std::string>>
+  ComputePlatformResolvedLocales(
+      const std::vector<std::string>& supported_locale_data);
+
+  virtual std::shared_ptr<ExternalViewEmbedder> CreateExternalViewEmbedder();
+
  protected:
   PlatformView::Delegate& delegate_;
   const TaskRunners task_runners_;
 
+  PointerDataPacketConverter pointer_data_packet_converter_;
   SkISize size_;
   fml::WeakPtrFactory<PlatformView> weak_factory_;
 

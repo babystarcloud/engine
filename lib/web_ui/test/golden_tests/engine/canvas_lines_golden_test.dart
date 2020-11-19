@@ -2,15 +2,21 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+// @dart = 2.6
 import 'dart:html' as html;
 
+import 'package:test/bootstrap/browser.dart';
+import 'package:test/test.dart';
 import 'package:ui/src/engine.dart';
 import 'package:ui/ui.dart';
-import 'package:test/test.dart';
 
 import 'package:web_engine_tester/golden_tester.dart';
 
-void main() async {
+void main() {
+  internalBootstrapBrowserTest(() => testMain);
+}
+
+void testMain() async {
   final Rect region = Rect.fromLTWH(0, 0, 300, 300);
 
   BitmapCanvas canvas;
@@ -29,20 +35,19 @@ void main() async {
 
     html.document.body.append(canvas.rootElement);
     await matchGoldenFile('canvas_lines_thickness.png', region: region);
-  }, timeout: const Timeout(Duration(seconds: 10)));
-
+  });
 }
 
 void paintLines(BitmapCanvas canvas) {
-    final PaintData paint1 = PaintData()
+    final SurfacePaintData paint1 = SurfacePaintData()
       ..color = Color(0xFF9E9E9E) // Colors.grey
       ..strokeWidth = 1.0
       ..style = PaintingStyle.stroke;
-    final PaintData paint2 = PaintData()
+    final SurfacePaintData paint2 = SurfacePaintData()
       ..color = Color(0x7fff0000)
       ..strokeWidth = 1.0
       ..style = PaintingStyle.stroke;
-    final PaintData paint3 = PaintData()
+    final SurfacePaintData paint3 = SurfacePaintData()
       ..color = Color(0xFF4CAF50) //Colors.green
       ..strokeWidth = 1.0
       ..style = PaintingStyle.stroke;

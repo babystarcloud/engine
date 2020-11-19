@@ -9,6 +9,7 @@
 #import "flutter/shell/platform/darwin/common/framework/Headers/FlutterCodecs.h"
 #import "flutter/shell/platform/darwin/macos/framework/Headers/FlutterEngine.h"
 #import "flutter/shell/platform/darwin/macos/framework/Source/FlutterEngine_Internal.h"
+#import "flutter/shell/platform/darwin/macos/framework/Source/FlutterMouseCursorPlugin.h"
 #import "flutter/shell/platform/darwin/macos/framework/Source/FlutterTextInputPlugin.h"
 #import "flutter/shell/platform/darwin/macos/framework/Source/FlutterView.h"
 #import "flutter/shell/platform/embedder/embedder.h"
@@ -60,6 +61,17 @@ struct MouseState {
   }
 };
 
+/**
+ * State tracking for keyboard events, to adapt between the events coming from the system and the
+ * events that the embedding API expects.
+ */
+struct KeyboardState {
+  /**
+   * The last known pressed modifier flag keys.
+   */
+  uint64_t previously_pressed_flags = 0;
+};
+
 }  // namespace
 
 #pragma mark - Private interface declaration.
@@ -83,6 +95,16 @@ struct MouseState {
  * The current state of the mouse and the sent mouse events.
  */
 @property(nonatomic) MouseState mouseState;
+
+/**
+ * The current state of the keyboard and pressed keys.
+ */
+@property(nonatomic) KeyboardState keyboardState;
+
+/**
+ * Event monitor for keyUp events.
+ */
+@property(nonatomic) id keyUpMonitor;
 
 /**
  * Starts running |engine|, including any initial setup.
@@ -123,7 +145,7 @@ struct MouseState {
 - (void)sendInitialSettings;
 
 /**
- * Responsds to updates in the user settings and passes this data to the engine.
+ * Responds to updates in the user settings and passes this data to the engine.
  */
 - (void)onSettingsChanged:(NSNotification*)notification;
 
@@ -131,6 +153,12 @@ struct MouseState {
  * Handles messages received from the Flutter engine on the _*Channel channels.
  */
 - (void)handleMethodCall:(FlutterMethodCall*)call result:(FlutterResult)result;
+
+/**
+ * Plays a system sound. |soundType| specifies which system sound to play. Valid
+ * values can be found in the SystemSoundType enum in the services SDK package.
+ */
+- (void)playSystemSound:(NSString*)soundType;
 
 /**
  * Reads the data from the clipboard. |format| specifies the media type of the
@@ -143,6 +171,11 @@ struct MouseState {
  * the keys are the type of data, and tervalue the data to be stored.
  */
 - (void)setClipboardData:(NSDictionary*)data;
+
+/**
+ * Returns true iff the clipboard contains nonempty string data.
+ */
+- (BOOL)clipboardHasStrings;
 
 @end
 
@@ -206,13 +239,13 @@ static void CommonInit(FlutterViewController* controller) {
 }
 
 - (void)loadView {
-  NSOpenGLContext* resourceContext = _engine.resourceContext;
-  if (!resourceContext) {
-    NSLog(@"Unable to create FlutterView; no resource context available.");
+  NSOpenGLContext* mainContext = _engine.openGLRenderer.openGLContext;
+  if (!mainContext) {
+    NSLog(@"Unable to create FlutterView; no GL context available.");
     return;
   }
-  FlutterView* flutterView = [[FlutterView alloc] initWithShareContext:resourceContext
-                                                       reshapeListener:self];
+  FlutterView* flutterView = [[FlutterView alloc] initWithMainContext:mainContext
+                                                      reshapeListener:self];
   self.view = flutterView;
 }
 
@@ -225,6 +258,14 @@ static void CommonInit(FlutterViewController* controller) {
   if (!_engine.running) {
     [self launchEngine];
   }
+  [self listenForMetaModifiedKeyUpEvents];
+}
+
+- (void)viewWillDisappear {
+  // Per Apple's documentation, it is discouraged to call removeMonitor: in dealloc, and it's
+  // recommended to be called earlier in the lifecycle.
+  [NSEvent removeMonitor:_keyUpMonitor];
+  _keyUpMonitor = nil;
 }
 
 - (void)dealloc {
@@ -252,7 +293,6 @@ static void CommonInit(FlutterViewController* controller) {
 }
 
 - (void)removeKeyResponder:(NSResponder*)responder {
-  [self.additionalKeyResponders removeObject:responder];
 }
 
 #pragma mark - Private methods
@@ -267,8 +307,30 @@ static void CommonInit(FlutterViewController* controller) {
   }
   // Send the initial user settings such as brightness and text scale factor
   // to the engine.
+  // TODO(stuartmorgan): Move this logic to FlutterEngine.
   [self sendInitialSettings];
   return YES;
+}
+
+// macOS does not call keyUp: on a key while the command key is pressed. This results in a loss
+// of a key event once the modified key is released. This method registers the
+// ViewController as a listener for a keyUp event before it's handled by NSApplication, and should
+// NOT modify the event to avoid any unexpected behavior.
+- (void)listenForMetaModifiedKeyUpEvents {
+  NSAssert(_keyUpMonitor == nil, @"_keyUpMonitor was already created");
+  FlutterViewController* __weak weakSelf = self;
+  _keyUpMonitor = [NSEvent
+      addLocalMonitorForEventsMatchingMask:NSEventMaskKeyUp
+                                   handler:^NSEvent*(NSEvent* event) {
+                                     // Intercept keyUp only for events triggered on the current
+                                     // view.
+                                     if (weakSelf.view &&
+                                         ([[event window] firstResponder] == weakSelf.view) &&
+                                         ([event modifierFlags] & NSEventModifierFlagCommand) &&
+                                         ([event type] == NSEventTypeKeyUp))
+                                       [weakSelf keyUp:event];
+                                     return event;
+                                   }];
 }
 
 - (void)configureTrackingArea {
@@ -301,6 +363,7 @@ static void CommonInit(FlutterViewController* controller) {
 }
 
 - (void)addInternalPlugins {
+  [FlutterMouseCursorPlugin registerWithRegistrar:[self registrarForPlugin:@"mousecursor"]];
   _textInputPlugin = [[FlutterTextInputPlugin alloc] initWithViewController:self];
   _keyEventChannel =
       [FlutterBasicMessageChannel messageChannelWithName:@"flutter/keyevent"
@@ -355,11 +418,11 @@ static void CommonInit(FlutterViewController* controller) {
   NSPoint locationInBackingCoordinates = [self.view convertPointToBacking:locationInView];
   FlutterPointerEvent flutterEvent = {
       .struct_size = sizeof(flutterEvent),
-      .device_kind = kFlutterPointerDeviceKindMouse,
       .phase = phase,
+      .timestamp = static_cast<size_t>(event.timestamp * USEC_PER_SEC),
       .x = locationInBackingCoordinates.x,
       .y = -locationInBackingCoordinates.y,  // convertPointToBacking makes this negative.
-      .timestamp = static_cast<size_t>(event.timestamp * NSEC_PER_MSEC),
+      .device_kind = kFlutterPointerDeviceKindMouse,
       // If a click triggered a synthesized kAdd, don't pass the buttons in that event.
       .buttons = phase == kAdd ? 0 : _mouseState.buttons,
   };
@@ -398,14 +461,18 @@ static void CommonInit(FlutterViewController* controller) {
 }
 
 - (void)dispatchKeyEvent:(NSEvent*)event ofType:(NSString*)type {
-  [_keyEventChannel sendMessage:@{
+  NSMutableDictionary* keyMessage = [@{
     @"keymap" : @"macos",
     @"type" : type,
     @"keyCode" : @(event.keyCode),
     @"modifiers" : @(event.modifierFlags),
-    @"characters" : event.characters,
-    @"charactersIgnoringModifiers" : event.charactersIgnoringModifiers,
-  }];
+  } mutableCopy];
+  // Calling these methods on any other type of event will raise an exception.
+  if (event.type == NSEventTypeKeyDown || event.type == NSEventTypeKeyUp) {
+    keyMessage[@"characters"] = event.characters;
+    keyMessage[@"charactersIgnoringModifiers"] = event.charactersIgnoringModifiers;
+  }
+  [_keyEventChannel sendMessage:keyMessage];
 }
 
 - (void)onSettingsChanged:(NSNotification*)notification {
@@ -434,18 +501,29 @@ static void CommonInit(FlutterViewController* controller) {
   if ([call.method isEqualToString:@"SystemNavigator.pop"]) {
     [NSApp terminate:self];
     result(nil);
+  } else if ([call.method isEqualToString:@"SystemSound.play"]) {
+    [self playSystemSound:call.arguments];
+    result(nil);
   } else if ([call.method isEqualToString:@"Clipboard.getData"]) {
     result([self getClipboardData:call.arguments]);
   } else if ([call.method isEqualToString:@"Clipboard.setData"]) {
     [self setClipboardData:call.arguments];
     result(nil);
+  } else if ([call.method isEqualToString:@"Clipboard.hasStrings"]) {
+    result(@{@"value" : @([self clipboardHasStrings])});
   } else {
     result(FlutterMethodNotImplemented);
   }
 }
 
+- (void)playSystemSound:(NSString*)soundType {
+  if ([soundType isEqualToString:@"SystemSoundType.alert"]) {
+    NSBeep();
+  }
+}
+
 - (NSDictionary*)getClipboardData:(NSString*)format {
-  NSPasteboard* pasteboard = [NSPasteboard generalPasteboard];
+  NSPasteboard* pasteboard = self.pasteboard;
   if ([format isEqualToString:@(kTextPlainFormat)]) {
     NSString* stringInPasteboard = [pasteboard stringForType:NSPasteboardTypeString];
     return stringInPasteboard == nil ? nil : @{@"text" : stringInPasteboard};
@@ -454,12 +532,20 @@ static void CommonInit(FlutterViewController* controller) {
 }
 
 - (void)setClipboardData:(NSDictionary*)data {
-  NSPasteboard* pasteboard = [NSPasteboard generalPasteboard];
+  NSPasteboard* pasteboard = self.pasteboard;
   NSString* text = data[@"text"];
+  [pasteboard clearContents];
   if (text && ![text isEqual:[NSNull null]]) {
-    [pasteboard clearContents];
     [pasteboard setString:text forType:NSPasteboardTypeString];
   }
+}
+
+- (BOOL)clipboardHasStrings {
+  return [self.pasteboard stringForType:NSPasteboardTypeString].length > 0;
+}
+
+- (NSPasteboard*)pasteboard {
+  return [NSPasteboard generalPasteboard];
 }
 
 #pragma mark - FlutterViewReshapeListener
@@ -499,6 +585,15 @@ static void CommonInit(FlutterViewController* controller) {
       [responder keyUp:event];
     }
   }
+}
+
+- (void)flagsChanged:(NSEvent*)event {
+  if (event.modifierFlags < _keyboardState.previously_pressed_flags) {
+    [self keyUp:event];
+  } else {
+    [self keyDown:event];
+  }
+  _keyboardState.previously_pressed_flags = event.modifierFlags;
 }
 
 - (void)mouseEntered:(NSEvent*)event {

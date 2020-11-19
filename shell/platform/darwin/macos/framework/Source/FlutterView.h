@@ -18,16 +18,16 @@
  * View capable of acting as a rendering target and input source for the Flutter
  * engine.
  */
-@interface FlutterView : NSOpenGLView
+@interface FlutterView : NSView
 
 - (nullable instancetype)initWithFrame:(NSRect)frame
-                          shareContext:(nonnull NSOpenGLContext*)shareContext
+                           mainContext:(nonnull NSOpenGLContext*)mainContext
                        reshapeListener:(nonnull id<FlutterViewReshapeListener>)reshapeListener
     NS_DESIGNATED_INITIALIZER;
 
-- (nullable instancetype)initWithShareContext:(nonnull NSOpenGLContext*)shareContext
-                              reshapeListener:
-                                  (nonnull id<FlutterViewReshapeListener>)reshapeListener;
+- (nullable instancetype)initWithMainContext:(nonnull NSOpenGLContext*)mainContext
+                             reshapeListener:
+                                 (nonnull id<FlutterViewReshapeListener>)reshapeListener;
 
 - (nullable instancetype)initWithFrame:(NSRect)frameRect
                            pixelFormat:(nullable NSOpenGLPixelFormat*)format NS_UNAVAILABLE;
@@ -36,13 +36,14 @@
 - (nonnull instancetype)init NS_UNAVAILABLE;
 
 /**
- * Sets this view as the current context object for OpenGL drawing.
+ * Flushes the OpenGL context and flips the surfaces. Expected to be called on raster thread.
  */
-- (void)makeCurrentContext;
+- (void)present;
 
 /**
- * Called when the OpenGL display should be updated.
+ * Ensures that framebuffer with requested size exists and returns the ID. Expected to be called on
+ * raster thread.
  */
-- (void)onPresent;
+- (int)frameBufferIDForSize:(CGSize)size;
 
 @end

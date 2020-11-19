@@ -4,27 +4,23 @@
 
 #include <windowsx.h>
 
-#include "flutter/fml/macros.h"
 #include "flutter/shell/platform/windows/win32_flutter_window.h"
 
 namespace flutter {
 namespace testing {
 
+/// Test class for Win32FlutterWindow.
 class Win32FlutterWindowTest : public Win32FlutterWindow {
  public:
   Win32FlutterWindowTest(int width, int height);
+  virtual ~Win32FlutterWindowTest();
 
-  ~Win32FlutterWindowTest();
-
-  // |Win32Window|
-  void OnFontChange() override;
-
-  bool OnFontChangeWasCalled();
+  // Prevent copying.
+  Win32FlutterWindowTest(Win32FlutterWindowTest const&) = delete;
+  Win32FlutterWindowTest& operator=(Win32FlutterWindowTest const&) = delete;
 
  private:
   bool on_font_change_called_ = false;
-
-  FML_DISALLOW_COPY_AND_ASSIGN(Win32FlutterWindowTest);
 };
 
 }  // namespace testing
